@@ -1,0 +1,63 @@
+name: CI
+
+# Lints every workflow, then proves the reusable ones end to end on a tiny stand-in app (tests/hello): five binaries are
+# built and smoke-tested, then publish-release.yml runs in dry-run mode on them. verify-published.yml needs a real
+# release, so CI checks only its syntax.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # go install checks the module against Go's checksum database, so the version is the pin.
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+      - run: |
+          actionlint="$(go env GOPATH)/bin/actionlint"
+          "$actionlint"
+
+  build:
+    name: Build the stand-in app
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      app: hello
+      asset-prefix: hello-0.0.0
+      linux-container: python:3.12-bullseye@sha256:7cc929040c5e8cf6036c5099d62a83708427c131fb7a7c965b5ba51e995eea1c
+      install-command: python -m pip install "pyinstaller>=6.22,<7"
+      build-command: python -m PyInstaller --noconfirm --clean --onefile --name hello --workpath .pyi-build --specpath .pyi-build --distpath dist tests/hello/hello.py
+      smoke-command: |
+        [ "$("$BIN" --version)" = "hello 0.0.0" ]
+        "$BIN" --selftest
+
+  publish-dry-run:
+    name: Publish (dry run)
+    needs: build
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: write
+    uses: ./.github/workflows/publish-release.yml
+    with:
+      dry-run: true
+      python-artifact: ""
+      notes-artifact: ""
+      expected-files: |
+        hello-0.0.0-windows-x86_64.exe
+        hello-0.0.0-linux-x86_64.tar.gz
+        hello-0.0.0-linux-arm64.tar.gz
+        hello-0.0.0-macos-arm64.tar.gz
+        hello-0.0.0-macos-x86_64.tar.gz
