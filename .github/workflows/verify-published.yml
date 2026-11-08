@@ -1,0 +1,127 @@
+name: Verify published release
+
+# Reusable. Checks a published release the way a user would: downloads every file from its public URL, checks
+# SHA256SUMS and the build attestation of each file, then runs each binary on a runner of its own kind with nothing of
+# the app installed. A failure means the release is broken for users. It publishes nothing.
+#
+# The attestation check names the caller's release workflow as the signer, because attestation is made in the caller
+# (see publish-release.yml). Override signer-workflow if the caller's release workflow has another file name.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag, for example v0.2.0
+        type: string
+        required: true
+      asset-prefix:
+        description: Start of every binary's asset name, as given to build-binaries.yml
+        type: string
+        required: true
+      app:
+        description: Name of the binary inside the archives, for example wikihose
+        type: string
+        required: true
+      expected-files:
+        description: Every file the release holds, SHA256SUMS excluded, one name per line
+        type: string
+        required: true
+      smoke-command:
+        description: Runs the downloaded binary, available as "$BIN". Runs in bash from an empty folder.
+        type: string
+        required: true
+      unix-archive:
+        description: The Linux and macOS files are .tar.gz (true) or bare binaries (false)
+        type: boolean
+        default: true
+      signer-workflow:
+        description: Workflow that attested the files. Empty means the caller's .github/workflows/release.yml.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  assets:
+    name: Published files, checksums and attestations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: read
+    env:
+      TAG: ${{ inputs.tag }}
+      EXPECTED: ${{ inputs.expected-files }}
+      SIGNER: ${{ inputs.signer-workflow || format('{0}/.github/workflows/release.yml', github.repository) }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download every published file from its public URL
+        run: |
+          mkdir dl && cd dl
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          curl -fsSL --retry 3 -O "$base/SHA256SUMS"
+          listed=$(awk '{print $2}' SHA256SUMS | sed 's/^\*//' | sort)
+          [ -n "$listed" ] || { echo "::error::SHA256SUMS lists no files"; exit 1; }
+          for f in $listed; do curl -fsSL --retry 3 -O "$base/$f" || { echo "::error::cannot download $f from $base"; exit 1; }; done
+          printf '%s\n' "$EXPECTED" | sed '/^[[:space:]]*$/d' | sort > ../expected.txt
+          # Everything the release holds is listed in SHA256SUMS and expected, and the other way round.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -vx SHA256SUMS | sort > ../published.txt
+          printf '%s\n' "$listed" > ../listed.txt
+          diff ../published.txt ../listed.txt || { echo "::error::SHA256SUMS and the published files differ"; exit 1; }
+          diff ../expected.txt ../published.txt || { echo "::error::the published files differ from the expected ones (< expected, > published)"; exit 1; }
+      - name: Verify SHA256SUMS
+        run: cd dl && sha256sum -c SHA256SUMS
+      - name: Verify the build provenance attestation of each file
+        run: |
+          cd dl
+          for f in $(awk '{print $2}' SHA256SUMS | sed 's/^\*//'); do
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" --signer-workflow "$SIGNER" --source-ref "refs/tags/$TAG" || { echo "::error::no valid attestation for $f"; exit 1; }
+          done
+
+  binary:
+    name: Published binary (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: windows-x86_64, os: windows-latest, ext: .exe}
+          - {name: linux-x86_64, os: ubuntu-latest}
+          - {name: linux-arm64, os: ubuntu-24.04-arm}
+          - {name: macos-arm64, os: macos-latest}
+          - {name: macos-x86_64, os: macos-15-intel}
+    env:
+      TAG: ${{ inputs.tag }}
+      APP: ${{ inputs.app }}
+      # The asset name: .exe on Windows, .tar.gz elsewhere when archived, nothing for a bare binary.
+      NAME: ${{ inputs.asset-prefix }}-${{ matrix.name }}${{ matrix.ext || (inputs.unix-archive && '.tar.gz' || '') }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # No checkout and no Python step: the binary must run on a runner with nothing of ours installed.
+      - name: Download the published file and verify its checksum
+        run: |
+          mkdir bin && cd bin
+          base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          curl -fsSL --retry 3 -O "$base/SHA256SUMS"
+          curl -fsSL --retry 3 -O "$base/$NAME" || { echo "::error::cannot download $NAME"; exit 1; }
+          grep -F " $NAME" SHA256SUMS > one.sum || { echo "::error::$NAME is not listed in SHA256SUMS"; exit 1; }
+          if command -v sha256sum >/dev/null; then sha256sum -c one.sum; else shasum -a 256 -c one.sum; fi
+      # A downloaded archive has no quarantine flag here, so this checks the file itself, not Gatekeeper.
+      - name: Unpack it
+        run: |
+          cd bin
+          case "$NAME" in
+            *.tar.gz) tar -xzf "$NAME"; test -x "$APP" || { echo "::error::the archive holds no executable $APP"; exit 1; } ;;
+            *.exe) cp "$NAME" "$APP.exe" ;;
+            *) cp "$NAME" "$APP"; chmod +x "$APP" ;;
+          esac
+      - name: Run it
+        working-directory: bin
+        run: |
+          BIN="./$APP"; if [ "$RUNNER_OS" = Windows ]; then BIN="./$APP.exe"; fi
+          export BIN
+          ${{ inputs.smoke-command }}

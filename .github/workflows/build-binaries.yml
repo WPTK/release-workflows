@@ -1,0 +1,143 @@
+name: Build binaries
+
+# Reusable. Builds a one-file PyInstaller binary for five platforms, each on its own kind of machine (PyInstaller cannot
+# cross-compile), runs the caller's smoke test on each, and uploads one artifact per platform named binary-<platform>.
+#
+#   windows-x86_64   windows-latest
+#   linux-x86_64     ubuntu-latest, inside the container you pass (pin it by digest)
+#   linux-arm64      ubuntu-24.04-arm, same container
+#   macos-arm64      macos-latest
+#   macos-x86_64     macos-15-intel (GitHub's last Intel image; it goes away in fall 2027)
+#
+# Asset names are <asset-prefix>-<platform><ext>: .exe on Windows, .tar.gz on Linux and macOS (an artifact upload drops
+# the executable bit and an archive keeps it; the archive holds one file named <app>). With unix-archive: false the
+# Linux and macOS files are the bare binary instead.
+#
+# The caller supplies every command, so nothing app-specific lives here. They run in bash on all five platforms, from
+# the repository root. This workflow has no secrets and publishes nothing.
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: Name of the binary PyInstaller produces in dist/ (without .exe), for example wikihose
+        type: string
+        required: true
+      asset-prefix:
+        description: Start of every asset name, for example wikihose-0.2.0 or wikihose
+        type: string
+        required: true
+      linux-container:
+        description: Image the two Linux builds run in, pinned by digest. It sets the glibc floor.
+        type: string
+        required: true
+      install-command:
+        description: Installs the app and PyInstaller. Runs in bash.
+        type: string
+        required: true
+      build-command:
+        description: Runs PyInstaller and leaves dist/<app> (dist/<app>.exe on Windows). Runs in bash.
+        type: string
+        required: true
+      smoke-command:
+        description: Runs the built binary, available as "$BIN". A non-zero exit fails the build. Runs in bash.
+        type: string
+        required: true
+      python-version:
+        description: Python the Windows and macOS builds use (the Linux containers bring their own)
+        type: string
+        default: "3.12"
+      unix-archive:
+        description: Ship Linux and macOS binaries as .tar.gz (true) or bare files (false)
+        type: boolean
+        default: true
+      glibc-floor:
+        description: The Linux binaries may need no glibc symbol newer than this. Empty turns the check off.
+        type: string
+        default: "2.31"
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    name: Binary (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    # Empty for the jobs that run straight on the runner; GitHub treats '' as "no container".
+    container: ${{ matrix.container }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            os: windows-latest
+            ext: .exe
+          - name: linux-x86_64
+            os: ubuntu-latest
+            container: ${{ inputs.linux-container }}
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            container: ${{ inputs.linux-container }}
+          - name: macos-arm64
+            os: macos-latest
+          - name: macos-x86_64
+            os: macos-15-intel
+    env:
+      BIN: dist/${{ inputs.app }}${{ matrix.ext }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: matrix.container == ''
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: Install
+        shell: bash
+        run: ${{ inputs.install-command }}
+      - name: Build
+        shell: bash
+        run: ${{ inputs.build-command }}
+      - name: Smoke-test the binary
+        shell: bash
+        run: |
+          ls -l "$BIN"
+          ${{ inputs.smoke-command }}
+      # The floor is claimed in the README, so prove it: no symbol newer than the floor may be needed.
+      - name: Check the glibc floor
+        if: runner.os == 'Linux' && inputs.glibc-floor != ''
+        shell: bash
+        env:
+          FLOOR: GLIBC_${{ inputs.glibc-floor }}
+        run: |
+          newest=$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "newest glibc symbol needed: $newest (floor $FLOOR)"
+          [ "$(printf '%s\n' "$FLOOR" "$newest" | sort -V | tail -1)" = "$FLOOR" ] || { echo "::error::needs $newest, newer than the $FLOOR floor"; exit 1; }
+      - name: Name the file
+        shell: bash
+        env:
+          APP: ${{ inputs.app }}
+          PREFIX: ${{ inputs.asset-prefix }}
+          NAME: ${{ matrix.name }}
+          EXT: ${{ matrix.ext }}
+          ARCHIVE: ${{ inputs.unix-archive }}
+        run: |
+          mkdir out
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "$BIN" "out/$PREFIX-$NAME$EXT"
+          elif [ "$ARCHIVE" = true ]; then
+            tar -C dist -czf "out/$PREFIX-$NAME.tar.gz" "$APP"
+            listing=$(tar -tvzf "out/$PREFIX-$NAME.tar.gz")
+            echo "$listing"
+            echo "$listing" | grep -Eq "^-rwx.* $APP\$" || { echo "::error::the archive lost the executable bit"; exit 1; }
+          else
+            cp "$BIN" "out/$PREFIX-$NAME"
+          fi
+          ls -l out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 7

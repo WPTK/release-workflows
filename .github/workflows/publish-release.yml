@@ -1,0 +1,98 @@
+name: Publish release
+
+# Reusable. Collects what the build jobs uploaded, checks the set is exactly what the caller expects, writes SHA256SUMS,
+# confirms the tag still points at the commit that was built, and creates the GitHub release.
+#
+# Build provenance is NOT attested here, on purpose. A certificate made inside a called workflow names the called
+# workflow as its signer, so `gh attestation verify --signer-workflow OWNER/app/.github/workflows/release.yml` would stop
+# matching. The caller runs actions/attest-build-provenance itself, in a job that comes before this one, over the same
+# artifacts (see the README for the job).
+#
+# Artifacts it reads: binary-* (from build-binaries.yml), the one named by python-artifact (wheel and sdist) and the one
+# named by notes-artifact (the release notes file). It needs `contents: write` from the calling job.
+
+on:
+  workflow_call:
+    inputs:
+      expected-files:
+        description: Every file the release must hold, SHA256SUMS excluded, one name per line. Any other file stops it.
+        type: string
+        required: true
+      python-artifact:
+        description: Artifact holding the wheel and sdist. Empty if there is none.
+        type: string
+        default: dist
+      notes-artifact:
+        description: Artifact holding the release notes. Empty for none.
+        type: string
+        default: release-notes
+      notes-file:
+        description: File name of the notes inside notes-artifact
+        type: string
+        default: notes.md
+      dry-run:
+        description: Do everything except check the tag and create the release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Create the GitHub release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.python-artifact != ''
+        with:
+          name: ${{ inputs.python-artifact }}
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.notes-artifact != ''
+        with:
+          name: ${{ inputs.notes-artifact }}
+          path: notes
+      # A renamed or dropped matrix entry must stop the release here, before anything else (PyPI, for one) can take the
+      # version. The set must match both ways: nothing missing and nothing extra.
+      - name: Check the file set
+        env:
+          EXPECTED: ${{ inputs.expected-files }}
+        run: |
+          printf '%s\n' "$EXPECTED" | sed '/^[[:space:]]*$/d' | sort > expected.txt
+          ls release | sort > found.txt
+          diff expected.txt found.txt || { echo "::error::the files built differ from the files expected (< expected, > found)"; exit 1; }
+      - name: Write SHA256SUMS
+        run: |
+          cd release
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Confirm the tag still points at the commit that was built
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          now=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
+          if [ "$now" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG now points at $now, but this run built $GITHUB_SHA; not publishing"
+            exit 1
+          fi
+      - name: Create the release
+        if: ${{ !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          NOTES: ${{ inputs.notes-artifact != '' && format('notes/{0}', inputs.notes-file) || '' }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG")
+          if [ -n "$NOTES" ]; then args+=(--notes-file "$NOTES"); else args+=(--notes ""); fi
+          gh release create "$TAG" release/* "${args[@]}"
