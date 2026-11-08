@@ -1,0 +1,5 @@
+dist/
+out/
+.pyi-build/
+*.spec
+__pycache__/
