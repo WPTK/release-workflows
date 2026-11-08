@@ -68,7 +68,7 @@ jobs:
           EXPECTED: ${{ inputs.expected-files }}
         run: |
           printf '%s\n' "$EXPECTED" | sed '/^[[:space:]]*$/d' | sort > expected.txt
-          ls release | sort > found.txt
+          (cd release && printf '%s\n' *) | sort > found.txt
           diff expected.txt found.txt || { echo "::error::the files built differ from the files expected (< expected, > found)"; exit 1; }
       - name: Write SHA256SUMS
         run: |

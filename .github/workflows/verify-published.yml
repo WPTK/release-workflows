@@ -75,9 +75,9 @@ jobs:
       - name: Verify the build provenance attestation of each file
         run: |
           cd dl
-          for f in $(awk '{print $2}' SHA256SUMS | sed 's/^\*//'); do
+          while read -r f; do
             gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" --signer-workflow "$SIGNER" --source-ref "refs/tags/$TAG" || { echo "::error::no valid attestation for $f"; exit 1; }
-          done
+          done < <(awk '{print $2}' SHA256SUMS | sed 's/^\*//')
 
   binary:
     name: Published binary (${{ matrix.name }})

@@ -27,7 +27,9 @@ jobs:
           persist-credentials: false
       # go install checks the module against Go's checksum database, so the version is the pin.
       - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
-      - run: "$(go env GOPATH)/bin/actionlint"
+      - run: |
+          actionlint="$(go env GOPATH)/bin/actionlint"
+          "$actionlint"
 
   build:
     name: Build the stand-in app
