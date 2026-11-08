@@ -30,6 +30,10 @@ on:
         description: File name of the notes inside notes-artifact
         type: string
         default: notes.md
+      title-prefix:
+        description: Put before the tag in the release title, for example "myapp " gives "myapp v0.2.0"
+        type: string
+        default: ""
       dry-run:
         description: Do everything except check the tag and create the release
         type: boolean
@@ -91,8 +95,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          TITLE: ${{ inputs.title-prefix }}${{ github.ref_name }}
           NOTES: ${{ inputs.notes-artifact != '' && format('notes/{0}', inputs.notes-file) || '' }}
         run: |
-          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG")
+          # A draft first, then the upload, then publish, so nobody sees a release without its files. It refuses a tag
+          # that already has a release, so a re-run never mixes two builds.
+          args=(--repo "$GITHUB_REPOSITORY" --verify-tag --draft --title "$TITLE")
           if [ -n "$NOTES" ]; then args+=(--notes-file "$NOTES"); else args+=(--notes ""); fi
-          gh release create "$TAG" release/* "${args[@]}"
+          gh release create "$TAG" "${args[@]}"
+          gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" || { echo "::error::upload failed; the draft release is left in place"; exit 1; }
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

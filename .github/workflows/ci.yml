@@ -44,6 +44,20 @@ jobs:
         [ "$("$BIN" --version)" = "hello 0.0.0" ]
         "$BIN" --selftest
 
+  check:
+    name: Check release
+    needs: build
+    uses: ./.github/workflows/check-release.yml
+    with:
+      check-tag: false
+      python-artifact: ""
+      expected-files: |
+        hello-0.0.0-windows-x86_64.exe
+        hello-0.0.0-linux-x86_64.tar.gz
+        hello-0.0.0-linux-arm64.tar.gz
+        hello-0.0.0-macos-arm64.tar.gz
+        hello-0.0.0-macos-x86_64.tar.gz
+
   publish-dry-run:
     name: Publish (dry run)
     needs: build
