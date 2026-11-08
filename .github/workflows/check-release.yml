@@ -1,0 +1,60 @@
+name: Check release
+
+# Reusable. The gates that must pass BEFORE build provenance is attested: the build produced exactly the expected files,
+# and the tag still points at the commit this run built. Attesting first would put a signed claim about a moved tag, or
+# about a stray file that is never released, into the public log. publish-release.yml repeats both checks just before it
+# releases. Read-only: it needs `contents: read`.
+
+on:
+  workflow_call:
+    inputs:
+      expected-files:
+        description: Every file the release must hold, SHA256SUMS excluded, one name per line
+        type: string
+        required: true
+      python-artifact:
+        description: Artifact holding the wheel and sdist. Empty if there is none.
+        type: string
+        default: dist
+      check-tag:
+        description: Check the tag still points at the built commit (turn off outside a tag run)
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check the files and the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: release
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: inputs.python-artifact != ''
+        with:
+          name: ${{ inputs.python-artifact }}
+          path: release
+      - name: Check the file set
+        env:
+          EXPECTED: ${{ inputs.expected-files }}
+        run: |
+          printf '%s\n' "$EXPECTED" | sed '/^[[:space:]]*$/d' | sort > expected.txt
+          (cd release && printf '%s\n' *) | sort > found.txt
+          diff expected.txt found.txt || { echo "::error::the files built differ from the files expected (< expected, > found)"; exit 1; }
+      - name: Confirm the tag still points at the commit that was built
+        if: inputs.check-tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          now=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
+          if [ "$now" != "$GITHUB_SHA" ]; then
+            echo "::error::$TAG now points at $now, but this run built $GITHUB_SHA"
+            exit 1
+          fi

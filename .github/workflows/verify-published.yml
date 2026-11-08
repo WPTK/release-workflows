@@ -34,6 +34,10 @@ on:
         description: The Linux and macOS files are .tar.gz (true) or bare binaries (false)
         type: boolean
         default: true
+      verify-attestations:
+        description: Check the build attestation of each file. Turn off for an app that does not attest yet.
+        type: boolean
+        default: true
       signer-workflow:
         description: Workflow that attested the files. Empty means the caller's .github/workflows/release.yml.
         type: string
@@ -73,10 +77,11 @@ jobs:
       - name: Verify SHA256SUMS
         run: cd dl && sha256sum -c SHA256SUMS
       - name: Verify the build provenance attestation of each file
+        if: inputs.verify-attestations
         run: |
           cd dl
           while read -r f; do
-            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" --signer-workflow "$SIGNER" --source-ref "refs/tags/$TAG" || { echo "::error::no valid attestation for $f"; exit 1; }
+            gh attestation verify "$f" --repo "$GITHUB_REPOSITORY" --signer-workflow "$SIGNER" --source-ref "refs/tags/$TAG" < /dev/null || { echo "::error::no valid attestation for $f"; exit 1; }
           done < <(awk '{print $2}' SHA256SUMS | sed 's/^\*//')
 
   binary:
@@ -108,7 +113,7 @@ jobs:
           base="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
           curl -fsSL --retry 3 -O "$base/SHA256SUMS"
           curl -fsSL --retry 3 -O "$base/$NAME" || { echo "::error::cannot download $NAME"; exit 1; }
-          grep -F " $NAME" SHA256SUMS > one.sum || { echo "::error::$NAME is not listed in SHA256SUMS"; exit 1; }
+          awk -v n="$NAME" '$2 == n || $2 == "*" n' SHA256SUMS > one.sum; [ -s one.sum ] || { echo "::error::$NAME is not listed in SHA256SUMS"; exit 1; }
           if command -v sha256sum >/dev/null; then sha256sum -c one.sum; else shasum -a 256 -c one.sum; fi
       # A downloaded archive has no quarantine flag here, so this checks the file itself, not Gatekeeper.
       - name: Unpack it

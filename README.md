@@ -6,7 +6,8 @@ release and its check are written once. Each app keeps a short `release.yml` tha
 | Workflow | What it does |
 | --- | --- |
 | [`build-binaries.yml`](.github/workflows/build-binaries.yml) | Builds a one-file PyInstaller binary on Windows, Linux (x86_64, arm64) and macOS (arm64, x86_64), smoke-tests each, checks the Linux glibc floor, names the files and uploads `binary-<platform>` artifacts. |
-| [`publish-release.yml`](.github/workflows/publish-release.yml) | Checks the build produced exactly the expected files, writes `SHA256SUMS`, confirms the tag still points at the built commit and creates the GitHub release. |
+| [`check-release.yml`](.github/workflows/check-release.yml) | Read-only gates to run before attesting: the build produced exactly the expected files, and the tag still points at the built commit. |
+| [`publish-release.yml`](.github/workflows/publish-release.yml) | Repeats those checks, writes `SHA256SUMS` and creates the GitHub release as a draft, uploads the files, then publishes it (refusing a tag that already has a release). |
 | [`verify-published.yml`](.github/workflows/verify-published.yml) | After a release: downloads every file from its public URL, checks `SHA256SUMS` and each attestation, and runs each binary on its own kind of runner. |
 
 Every command the apps need (install, build, smoke test) is an input, so nothing app-specific lives here. All
@@ -39,8 +40,14 @@ jobs:
         "$BIN" --version
         "$BIN" --selftest
 
-  attest:
+  check:
     needs: [build, dist]
+    uses: WPTK/release-workflows/.github/workflows/check-release.yml@<sha> # v0.1.0
+    with:
+      expected-files: ... # the same list as below
+
+  attest:
+    needs: check
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -73,7 +80,15 @@ jobs:
 
 Asset names are `<asset-prefix>-<platform>`, with `.exe` on Windows and `.tar.gz` elsewhere (the archive holds one file
 named after the app, with its executable bit). Pass `unix-archive: false` for bare binaries. `publish-release.yml` takes
-`dry-run: true` to do everything except create the release.
+`dry-run: true` to do everything except create the release, and `title-prefix` for a title like `myapp v0.2.0`.
+`verify-published.yml` takes `verify-attestations: false` for an app that does not attest yet.
+
+GitHub does not pass a caller's workflow-level `env:` to a called workflow, so set anything the commands need (for
+example `PIP_CONSTRAINT`) inside the command itself.
+
+**Command inputs are pasted into shell scripts.** `install-command`, `build-command` and `smoke-command` go straight into
+`run:` blocks, so pass only literals and values the caller has already checked (a version read from a tag that matched a
+pattern, say). Never build one from a branch name, PR title or anything else an outsider can set.
 
 Build-time details worth knowing:
 
